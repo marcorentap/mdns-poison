@@ -1,0 +1,12 @@
+services:
+  mdns-poison:
+    build: .
+    container_name: mdns-poison
+    network_mode: host
+    volumes:
+      - .:/app/data:ro
+    environment:
+      - RECORDS_FILE=/app/data/records.txt
+      - INTERVAL=2 # seconds between announcements
+      - TTL=5
+    restart: unless-stopped
