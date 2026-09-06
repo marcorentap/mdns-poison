@@ -33,7 +33,9 @@ def load_records(path):
                 print(f"records.txt:{lineno}: skipping malformed line: {raw!r}", file=sys.stderr)
                 continue
             hostname, ip = parts
-            if hostname.startswith("*."):
+            if hostname == "*":
+                pass
+            elif hostname.startswith("*."):
                 base = hostname[2:]
                 if not base.endswith(".local"):
                     base += ".local"
@@ -47,6 +49,10 @@ def load_records(path):
                 continue
             rtype = QTYPE.AAAA if addr.version == 6 else QTYPE.A
             records.append((hostname, rtype, ip))
+    catchall = next((r for r in records if r[0] == "*"), None)
+    if catchall:
+        print("records.txt: '*' present, ignoring all other records", file=sys.stderr)
+        return [catchall]
     return records
 
 
@@ -60,6 +66,8 @@ def build_response(matches, ttl):
 
 
 def hostname_matches(hostname, qname):
+    if hostname == "*":
+        return True
     if hostname.startswith("*."):
         base = hostname[2:]
         return qname == base or qname.endswith("." + base)
@@ -76,7 +84,7 @@ def matching_records(records, query):
                 continue
             if question.qtype not in (rtype, QTYPE.ANY):
                 continue
-            answer_name = qname if hostname.startswith("*.") else hostname
+            answer_name = qname if hostname.startswith("*") else hostname
             match = (answer_name, rtype, ip)
             if match not in matches:
                 matches.append(match)
@@ -123,7 +131,7 @@ def main():
     print(f"Announcing (cache-flush, TTL={TTL}) every {INTERVAL}s, answering queries, on {MDNS_ADDR}:{MDNS_PORT}")
 
     sock = make_socket()
-    concrete = [r for r in records if not r[0].startswith("*.")]
+    concrete = [r for r in records if not r[0].startswith("*")]
     packet = build_response(concrete, TTL) if concrete else None
     last_mtime = os.stat(RECORDS_FILE).st_mtime
     next_send = time.monotonic()
@@ -151,7 +159,7 @@ def main():
             new_records = load_records(RECORDS_FILE)
             if new_records:
                 records = new_records
-                concrete = [r for r in records if not r[0].startswith("*.")]
+                concrete = [r for r in records if not r[0].startswith("*")]
                 packet = build_response(concrete, TTL) if concrete else None
                 print(f"Reloaded {len(records)} record(s) from {RECORDS_FILE}:")
                 describe_records(records)
