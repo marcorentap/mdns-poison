@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
-"""mDNS cache-flush takeover. Reads <hostname> <ip> lines from records.txt;
-ip is IPv4 or IPv6, emitted as A/AAAA. Periodically announces on
-224.0.0.251:5353 with class 0x8001 (cache-flush), evicting the real record,
-and answers incoming queries for the same names.
+"""mDNS cache-flush takeover. Reads records.txt (<hostname> <ip>, or
+<*.hostname> <ip> for wildcard queries), announces and answers queries.
 """
 import ipaddress
 import os
@@ -35,7 +33,12 @@ def load_records(path):
                 print(f"records.txt:{lineno}: skipping malformed line: {raw!r}", file=sys.stderr)
                 continue
             hostname, ip = parts
-            if not hostname.endswith(".local"):
+            if hostname.startswith("*."):
+                base = hostname[2:]
+                if not base.endswith(".local"):
+                    base += ".local"
+                hostname = "*." + base
+            elif not hostname.endswith(".local"):
                 hostname += ".local"
             try:
                 addr = ipaddress.ip_address(ip)
@@ -56,17 +59,27 @@ def build_response(matches, ttl):
     return DNSRecord(DNSHeader(id=0, qr=1, aa=1), rr=rrs).pack()
 
 
+def hostname_matches(hostname, qname):
+    if hostname.startswith("*."):
+        base = hostname[2:]
+        return qname == base or qname.endswith("." + base)
+    return hostname == qname
+
+
 def matching_records(records, query):
-    """Records whose name+type answer one of the query's questions."""
+    """Wildcard hostnames answer with the queried name."""
     matches = []
     for question in query.questions:
         qname = str(question.qname).rstrip(".").lower()
-        for record in records:
-            hostname, rtype, _ = record
-            if hostname.rstrip(".").lower() != qname:
+        for hostname, rtype, ip in records:
+            if not hostname_matches(hostname.rstrip(".").lower(), qname):
                 continue
-            if question.qtype in (rtype, QTYPE.ANY) and record not in matches:
-                matches.append(record)
+            if question.qtype not in (rtype, QTYPE.ANY):
+                continue
+            answer_name = qname if hostname.startswith("*.") else hostname
+            match = (answer_name, rtype, ip)
+            if match not in matches:
+                matches.append(match)
     return matches
 
 
@@ -75,7 +88,7 @@ def handle_query(sock, records, data):
         query = DNSRecord.parse(data)
     except Exception:
         return
-    if query.header.qr != 0:  # not a question, ignore (includes our own announcements)
+    if query.header.qr != 0:  # ignore responses (incl. our own)
         return
     matches = matching_records(records, query)
     if matches:
@@ -110,7 +123,8 @@ def main():
     print(f"Announcing (cache-flush, TTL={TTL}) every {INTERVAL}s, answering queries, on {MDNS_ADDR}:{MDNS_PORT}")
 
     sock = make_socket()
-    packet = build_response(records, TTL)
+    concrete = [r for r in records if not r[0].startswith("*.")]
+    packet = build_response(concrete, TTL) if concrete else None
     last_mtime = os.stat(RECORDS_FILE).st_mtime
     next_send = time.monotonic()
 
@@ -137,17 +151,19 @@ def main():
             new_records = load_records(RECORDS_FILE)
             if new_records:
                 records = new_records
-                packet = build_response(records, TTL)
+                concrete = [r for r in records if not r[0].startswith("*.")]
+                packet = build_response(concrete, TTL) if concrete else None
                 print(f"Reloaded {len(records)} record(s) from {RECORDS_FILE}:")
                 describe_records(records)
             else:
                 print(f"{RECORDS_FILE} changed but has no valid records, keeping previous set", file=sys.stderr)
             last_mtime = mtime
 
-        try:
-            sock.sendto(packet, (MDNS_ADDR, MDNS_PORT))
-        except OSError as exc:
-            print(f"send failed: {exc}", file=sys.stderr)
+        if packet:
+            try:
+                sock.sendto(packet, (MDNS_ADDR, MDNS_PORT))
+            except OSError as exc:
+                print(f"send failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
